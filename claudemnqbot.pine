@@ -1,0 +1,322 @@
+// @version=6
+// =============================================================================
+// claudemnqbot v1 — Research-Driven NQ/MNQ Window Strategy
+// =============================================================================
+//
+// WINDOWS (NY time):
+//   9:30–9:40   RTH open — first 10 minutes
+//   9:50–10:10  Post-open — opening range follow-through
+//   10:20–10:40 Mid-morning — first reversal opportunity
+//   10:50–11:10 Late morning — trend continuation or rejection
+//   11:20–11:40 Pre-lunch — fade or continue
+//   11:50–12:10 Lunch transition
+//   1:50–2:10   Afternoon — post-lunch trend resumption
+//
+// PATTERNS (4 types applied to every window):
+//   A. Failed Auction  — price makes new extreme then closes opposite
+//                        (trapped traders forced out, accelerates reversal)
+//   B. VWAP Reversion  — price stretched 2+ ATR from VWAP, rejection wick
+//                        (institutional mean-reversion tendency)
+//   C. ORB Follow-through — break of 9:30 high/low with momentum
+//                        (opening range breakout, most studied NQ pattern)
+//   D. VWAP Continuation — price confirmed above/below VWAP, momentum bar
+//                        (trade with institutional flow direction)
+//
+// STOPS: ATR-adaptive (2.5× ATR, floor 15 pts, ceiling 40 pts)
+// TRAIL: At +1.5× stop → lock small profit
+//        At +2.5× stop → trail 1× ATR behind price continuously
+//
+// One trade per window. EOD close at 4:05 PM.
+// =============================================================================
+
+strategy(
+    title              = "claudemnqbot v1",
+    shorttitle         = "cmb",
+    overlay            = true,
+    pyramiding         = 0,
+    default_qty_type   = strategy.fixed,
+    default_qty_value  = 5,
+    initial_capital    = 50000,
+    currency           = currency.USD,
+    calc_on_every_tick = false,
+    process_orders_on_close = true,
+    commission_type    = strategy.commission.cash_per_contract,
+    commission_value   = 0.74,
+    slippage           = 1
+)
+
+// =============================================================================
+// INPUTS
+// =============================================================================
+
+contracts     = input.int(5,    "Contracts (MNQ)",          minval=1,    maxval=20)
+webhookSecret = input.string("changeme", "Webhook secret")
+enableAlerts  = input.bool(true, "Enable webhook alerts")
+
+atrPeriod     = input.int(14,    "ATR period",               minval=5,    group="Stop/Trail")
+atrStopMult   = input.float(2.5, "Stop: ATR multiplier",     minval=1.0,  group="Stop/Trail")
+stopMin       = input.float(15.0,"Stop: minimum pts",        minval=5.0,  group="Stop/Trail")
+stopMax       = input.float(40.0,"Stop: maximum pts",        minval=15.0, group="Stop/Trail")
+stage1Trigger = input.float(1.5, "Stage1 trigger (× stop)",  minval=0.5,  group="Stop/Trail")
+stage1Lock    = input.float(0.1, "Stage1 lock (× stop)",     minval=0.0,  group="Stop/Trail")
+trailTrigger  = input.float(2.5, "Trail trigger (× stop)",   minval=1.0,  group="Stop/Trail")
+trailAtr      = input.float(1.0, "Trail behind (× ATR)",     minval=0.25, group="Stop/Trail")
+
+vwapStretch   = input.float(2.0, "VWAP stretch trigger (× ATR)", minval=0.5, group="Filters")
+faLookback    = input.int(10,    "Failed auction lookback",  minval=5,    group="Filters")
+minBodyFrac   = input.float(0.25,"Min body/ATR for momentum",minval=0.05, group="Filters")
+
+// =============================================================================
+// TIME
+// =============================================================================
+
+nyHour   = hour(time,   "America/New_York")
+nyMinute = minute(time, "America/New_York")
+tod      = nyHour * 60 + nyMinute
+
+in930  = tod >= 570 and tod < 580   // 9:30–9:40
+in950  = tod >= 590 and tod < 610   // 9:50–10:10
+in1020 = tod >= 620 and tod < 640   // 10:20–10:40
+in1050 = tod >= 650 and tod < 670   // 10:50–11:10
+in1120 = tod >= 680 and tod < 700   // 11:20–11:40
+in1150 = tod >= 710 and tod < 730   // 11:50–12:10
+in1350 = tod >= 830 and tod < 850   // 1:50–2:10
+
+inAnyWindow = in930 or in950 or in1020 or in1050 or in1120 or in1150 or in1350
+inRTH       = tod >= 570 and tod < 965
+
+isNewDay = ta.change(time("D")) != 0
+
+// =============================================================================
+// SESSION GATES — one trade per window
+// =============================================================================
+
+var bool fired930  = false
+var bool fired950  = false
+var bool fired1020 = false
+var bool fired1050 = false
+var bool fired1120 = false
+var bool fired1150 = false
+var bool fired1350 = false
+
+if isNewDay
+    fired930  := false
+    fired950  := false
+    fired1020 := false
+    fired1050 := false
+    fired1120 := false
+    fired1150 := false
+    fired1350 := false
+
+windowFired = (in930  and fired930)  or (in950  and fired950)  or
+              (in1020 and fired1020) or (in1050 and fired1050) or
+              (in1120 and fired1120) or (in1150 and fired1150) or
+              (in1350 and fired1350)
+
+// =============================================================================
+// KEY LEVELS
+// =============================================================================
+
+var float orbHigh = na
+var float orbLow  = na
+var float rthOpen = na
+
+if isNewDay
+    orbHigh := na
+    orbLow  := na
+    rthOpen := na
+
+if nyHour == 9 and nyMinute == 30 and na(rthOpen)
+    rthOpen := open
+
+if in930
+    orbHigh := na(orbHigh) ? high : math.max(orbHigh, high)
+    orbLow  := na(orbLow)  ? low  : math.min(orbLow,  low)
+
+// =============================================================================
+// INDICATORS
+// =============================================================================
+
+vwapLine  = ta.vwap(hlc3)
+atrVal    = ta.atr(atrPeriod)
+stopPts   = math.max(stopMin, math.min(stopMax, atrStopMult * atrVal))
+
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+bodySize  = math.abs(close - open)
+isBull    = close >= open
+isBear    = close < open
+hasBody   = bodySize >= atrVal * minBodyFrac
+
+// =============================================================================
+// PATTERNS
+// =============================================================================
+
+// A. Failed Auction
+//    New extreme vs prior N bars, but closes opposite direction
+//    Rationale: trapped traders forced to exit, accelerates move
+faLong  = low  < ta.lowest(low[1],  faLookback) and isBull
+faShort = high > ta.highest(high[1], faLookback) and isBear
+
+// B. VWAP Reversion
+//    Price stretched beyond vwapStretch × ATR from VWAP
+//    Current bar shows rejection wick back toward VWAP
+//    Rationale: institutional mean reversion, VWAP is the benchmark
+revLong  = close < vwapLine - vwapStretch * atrVal and isBull and lowerWick > bodySize
+revShort = close > vwapLine + vwapStretch * atrVal and isBear and upperWick > bodySize
+
+// C. ORB Follow-through
+//    Price breaks out of the 9:30–9:40 range with a momentum body
+//    Rationale: opening range defines the day's bias; breakout confirms direction
+orbValid      = not na(orbHigh) and not in930
+orbBreakLong  = orbValid and close > orbHigh and isBull and hasBody and close[1] <= orbHigh
+orbBreakShort = orbValid and close < orbLow  and isBear and hasBody and close[1] >= orbLow
+
+// D. VWAP Continuation
+//    Price confirmed on VWAP side (2 bars), momentum bar in same direction
+//    No excessive wick against the move (showing real commitment)
+//    Rationale: trade with institutional flow when price holds VWAP side
+contLong  = close > vwapLine and close[1] > vwapLine and isBull and hasBody and lowerWick < bodySize
+contShort = close < vwapLine and close[1] < vwapLine and isBear and hasBody and upperWick < bodySize
+
+// Combine signals (all longs require isBull, all shorts require isBear → no conflict)
+anyLong  = faLong  or revLong  or orbBreakLong  or contLong
+anyShort = faShort or revShort or orbBreakShort or contShort
+
+canEnter = inAnyWindow and not windowFired and strategy.position_size == 0
+
+goLong  = canEnter and anyLong
+goShort = canEnter and anyShort
+
+// =============================================================================
+// ENTRY TRACKING
+// =============================================================================
+
+var string activeRule   = ""
+var string activeWindow = ""
+
+winName = in930 ? "nine_thirty" : in950 ? "nine_fifty" : in1020 ? "ten_twenty" : in1050 ? "ten_fifty" : in1120 ? "eleven_twenty" : in1150 ? "eleven_fifty" : "one_fifty"
+
+if goLong
+    activeRule   := faLong ? "failed_auction_long" : revLong ? "vwap_reversion_long" : orbBreakLong ? "orb_breakout_long" : "vwap_continuation_long"
+    activeWindow := winName
+    strategy.entry("Long", strategy.long, qty=contracts)
+    if in930
+        fired930 := true
+    if in950
+        fired950 := true
+    if in1020
+        fired1020 := true
+    if in1050
+        fired1050 := true
+    if in1120
+        fired1120 := true
+    if in1150
+        fired1150 := true
+    if in1350
+        fired1350 := true
+
+if goShort
+    activeRule   := faShort ? "failed_auction_short" : revShort ? "vwap_reversion_short" : orbBreakShort ? "orb_breakout_short" : "vwap_continuation_short"
+    activeWindow := winName
+    strategy.entry("Short", strategy.short, qty=contracts)
+    if in930
+        fired930 := true
+    if in950
+        fired950 := true
+    if in1020
+        fired1020 := true
+    if in1050
+        fired1050 := true
+    if in1120
+        fired1120 := true
+    if in1150
+        fired1150 := true
+    if in1350
+        fired1350 := true
+
+// =============================================================================
+// STOP / TRAIL MANAGEMENT
+// =============================================================================
+
+var float currentStop    = na
+var float entryPx        = na
+var float initStop       = na
+var bool  stage1Done     = false
+var bool  trailActive    = false
+
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    entryPx    := strategy.position_avg_price
+    isLng       = strategy.position_size > 0
+    initStop   := stopPts
+    currentStop := isLng ? entryPx - stopPts : entryPx + stopPts
+    stage1Done  := false
+    trailActive := false
+
+if strategy.position_size != 0
+    isLng      = strategy.position_size > 0
+    unrealized = isLng ? (close - entryPx) : (entryPx - close)
+    proposed   = currentStop
+
+    if not stage1Done and unrealized >= stage1Trigger * initStop
+        lockLevel  = isLng ? entryPx + stage1Lock * initStop : entryPx - stage1Lock * initStop
+        proposed  := isLng ? math.max(currentStop, lockLevel) : math.min(currentStop, lockLevel)
+        stage1Done := true
+
+    if unrealized >= trailTrigger * initStop
+        trailLevel  = isLng ? close - trailAtr * atrVal : close + trailAtr * atrVal
+        proposed   := isLng ? math.max(currentStop, trailLevel) : math.min(currentStop, trailLevel)
+        trailActive := true
+
+    currentStop := proposed
+
+    strategy.exit("SL_Long",  from_entry="Long",  stop=currentStop)
+    strategy.exit("SL_Short", from_entry="Short", stop=currentStop)
+
+// EOD close 4:05 PM
+if nyHour == 16 and nyMinute >= 5 and strategy.position_size != 0
+    strategy.close_all(comment="EOD")
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    currentStop := na
+    entryPx     := na
+    initStop    := na
+    stage1Done  := false
+    trailActive := false
+
+// =============================================================================
+// VISUALS
+// =============================================================================
+
+plot(vwapLine, "VWAP", color=color.new(color.blue, 0), linewidth=1)
+plot(not na(orbHigh) and not isNewDay ? orbHigh : na, "ORB High", color=color.new(color.orange, 20), linewidth=1)
+plot(not na(orbLow)  and not isNewDay ? orbLow  : na, "ORB Low",  color=color.new(color.orange, 20), linewidth=1)
+plot(strategy.position_size != 0 ? currentStop : na, "Stop", color=color.red, linewidth=2, style=plot.style_linebr)
+
+bgcolor(in930  ? color.new(color.blue,   92) : na, title="9:30")
+bgcolor(in950  ? color.new(color.purple, 92) : na, title="9:50")
+bgcolor(in1020 ? color.new(color.teal,   92) : na, title="10:20")
+bgcolor(in1050 ? color.new(color.orange, 92) : na, title="10:50")
+bgcolor(in1120 ? color.new(color.yellow, 92) : na, title="11:20")
+bgcolor(in1150 ? color.new(color.lime,   92) : na, title="11:50")
+bgcolor(in1350 ? color.new(color.blue,   92) : na, title="1:50")
+
+// =============================================================================
+// WEBHOOK ALERTS
+// =============================================================================
+
+onEntry = (goLong or goShort) and enableAlerts
+onExit  = strategy.position_size == 0 and strategy.position_size[1] != 0 and enableAlerts
+
+if onEntry
+    action  = goLong ? "long_entry" : "short_entry"
+    jsonMsg = '{"secret":"' + webhookSecret + '","event":"entry","action":"' + action + '","window":"' + activeWindow + '","rule":"' + activeRule + '","price":' + str.tostring(close, "#.##") + ',"ticker":"' + syminfo.ticker + '","contracts":' + str.tostring(contracts) + ',"stop_pts":' + str.tostring(stopPts, "#.##") + ',"vwap":' + str.tostring(vwapLine, "#.##") + ',"orb_high":' + str.tostring(orbHigh, "#.##") + ',"orb_low":' + str.tostring(orbLow, "#.##") + '}'
+    alert(jsonMsg, alert.freq_once_per_bar_close)
+
+if onExit
+    action     = strategy.position_size[1] > 0 ? "long_exit" : "short_exit"
+    grossPnl   = strategy.closedtrades.profit(strategy.closedtrades - 1) + strategy.closedtrades.commission(strategy.closedtrades - 1)
+    pnlPts     = grossPnl / (syminfo.pointvalue * contracts)
+    pnlDollars = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    jsonMsg    = '{"secret":"' + webhookSecret + '","event":"exit","action":"' + action + '","window":"' + activeWindow + '","price":' + str.tostring(close, "#.##") + ',"ticker":"' + syminfo.ticker + '","contracts":' + str.tostring(contracts) + ',"pnl_pts":' + str.tostring(pnlPts, "#.##") + ',"pnl_usd":' + str.tostring(pnlDollars, "#.##") + '}'
+    alert(jsonMsg, alert.freq_once_per_bar_close)
