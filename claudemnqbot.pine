@@ -1,18 +1,5 @@
-// @version=6
-// claudemnqbot v1 — debug: entry only, EOD close, no stops
-strategy(
-    title              = "claudemnqbot v1",
-    shorttitle         = "cmb",
-    overlay            = true,
-    pyramiding         = 0,
-    default_qty_type   = strategy.fixed,
-    default_qty_value  = 5,
-    initial_capital    = 50000,
-    currency           = currency.USD,
-    calc_on_every_tick = false
-)
-
-contracts = input.int(5, "Contracts (MNQ)", minval=1, maxval=20)
+//@version=6
+strategy("claudemnqbot v1", shorttitle="cmb", overlay=true, default_qty_value=5, default_qty_type=strategy.fixed)
 
 nyHour   = hour(time,   "America/New_York")
 nyMinute = minute(time, "America/New_York")
@@ -46,18 +33,12 @@ if isNewDay
     fired1150 := false
     fired1350 := false
 
-windowFired = (in930  and fired930)  or (in950  and fired950)  or
-              (in1020 and fired1020) or (in1050 and fired1050) or
-              (in1120 and fired1120) or (in1150 and fired1150) or
-              (in1350 and fired1350)
+windowFired = (in930 and fired930) or (in950 and fired950) or (in1020 and fired1020) or (in1050 and fired1050) or (in1120 and fired1120) or (in1150 and fired1150) or (in1350 and fired1350)
 
 canEnter = inAnyWindow and not windowFired and strategy.position_size == 0
 
-isBull = close >= open
-isBear = close  < open
-
-if canEnter and isBull
-    strategy.entry("Long", strategy.long, qty=contracts)
+if canEnter and close >= open
+    strategy.entry("Long", strategy.long)
     if in930
         fired930 := true
     if in950
@@ -73,8 +54,8 @@ if canEnter and isBull
     if in1350
         fired1350 := true
 
-if canEnter and isBear
-    strategy.entry("Short", strategy.short, qty=contracts)
+if canEnter and close < open
+    strategy.entry("Short", strategy.short)
     if in930
         fired930 := true
     if in950
@@ -90,13 +71,13 @@ if canEnter and isBear
     if in1350
         fired1350 := true
 
-if nyHour == 16 and nyMinute >= 5
-    strategy.close_all(comment="EOD")
+if nyHour >= 16
+    strategy.close_all()
 
-bgcolor(in930  ? color.new(color.blue,   92) : na, title="9:30")
-bgcolor(in950  ? color.new(color.purple, 92) : na, title="9:50")
-bgcolor(in1020 ? color.new(color.teal,   92) : na, title="10:20")
-bgcolor(in1050 ? color.new(color.orange, 92) : na, title="10:50")
-bgcolor(in1120 ? color.new(color.yellow, 92) : na, title="11:20")
-bgcolor(in1150 ? color.new(color.lime,   92) : na, title="11:50")
-bgcolor(in1350 ? color.new(color.blue,   92) : na, title="1:50")
+bgcolor(in930  ? color.new(color.blue,   92) : na)
+bgcolor(in950  ? color.new(color.purple, 92) : na)
+bgcolor(in1020 ? color.new(color.teal,   92) : na)
+bgcolor(in1050 ? color.new(color.orange, 92) : na)
+bgcolor(in1120 ? color.new(color.yellow, 92) : na)
+bgcolor(in1150 ? color.new(color.lime,   92) : na)
+bgcolor(in1350 ? color.new(color.blue,   92) : na)
