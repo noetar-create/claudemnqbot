@@ -9,10 +9,7 @@ strategy(
     default_qty_value  = 5,
     initial_capital    = 50000,
     currency           = currency.USD,
-    calc_on_every_tick = false,
-    commission_type    = strategy.commission.cash_per_contract,
-    commission_value   = 0.74,
-    slippage           = 1
+    calc_on_every_tick = false
 )
 
 contracts = input.int(5, "Contracts (MNQ)", minval=1, maxval=20)
