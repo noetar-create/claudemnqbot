@@ -14,70 +14,11 @@ in1150 = tod >= 710 and tod < 730
 in1350 = tod >= 830 and tod < 850
 
 inAnyWindow = in930 or in950 or in1020 or in1050 or in1120 or in1150 or in1350
-isNewDay    = ta.change(time("D")) != 0
 
-var bool fired930  = false
-var bool fired950  = false
-var bool fired1020 = false
-var bool fired1050 = false
-var bool fired1120 = false
-var bool fired1150 = false
-var bool fired1350 = false
-
-if isNewDay
-    fired930  := false
-    fired950  := false
-    fired1020 := false
-    fired1050 := false
-    fired1120 := false
-    fired1150 := false
-    fired1350 := false
-
-windowFired = (in930 and fired930) or (in950 and fired950) or (in1020 and fired1020) or (in1050 and fired1050) or (in1120 and fired1120) or (in1150 and fired1150) or (in1350 and fired1350)
-
-canEnter = inAnyWindow and not windowFired and strategy.position_size == 0
-
-if canEnter and close >= open
-    strategy.entry("Long", strategy.long)
-    if in930
-        fired930 := true
-    if in950
-        fired950 := true
-    if in1020
-        fired1020 := true
-    if in1050
-        fired1050 := true
-    if in1120
-        fired1120 := true
-    if in1150
-        fired1150 := true
-    if in1350
-        fired1350 := true
-
-if canEnter and close < open
-    strategy.entry("Short", strategy.short)
-    if in930
-        fired930 := true
-    if in950
-        fired950 := true
-    if in1020
-        fired1020 := true
-    if in1050
-        fired1050 := true
-    if in1120
-        fired1120 := true
-    if in1150
-        fired1150 := true
-    if in1350
-        fired1350 := true
+if inAnyWindow and strategy.position_size == 0
+    strategy.entry("L", close >= open ? strategy.long : strategy.short)
 
 if nyHour >= 16
     strategy.close_all()
 
-bgcolor(in930  ? color.new(color.blue,   92) : na)
-bgcolor(in950  ? color.new(color.purple, 92) : na)
-bgcolor(in1020 ? color.new(color.teal,   92) : na)
-bgcolor(in1050 ? color.new(color.orange, 92) : na)
-bgcolor(in1120 ? color.new(color.yellow, 92) : na)
-bgcolor(in1150 ? color.new(color.lime,   92) : na)
-bgcolor(in1350 ? color.new(color.blue,   92) : na)
+bgcolor(inAnyWindow ? color.new(color.blue, 92) : na)
