@@ -1,0 +1,9 @@
+//@version=6
+strategy("test", overlay=true, default_qty_value=1, default_qty_type=strategy.fixed)
+nyHour = hour(time, "America/New_York")
+nyMinute = minute(time, "America/New_York")
+is930 = nyHour == 9 and nyMinute == 30
+if is930 and strategy.position_size == 0
+    strategy.entry("L", strategy.long)
+if nyHour >= 16
+    strategy.close_all()
