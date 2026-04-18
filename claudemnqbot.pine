@@ -171,8 +171,9 @@ anyShort = faShort or revShort or orbBreakShort or contShort or momShort
 
 canEnter = inAnyWindow and not windowFired and strategy.position_size == 0
 
-goLong  = canEnter and anyLong
-goShort = canEnter and anyShort
+// DEBUG: strip all pattern conditions — take first bull/bear bar in each window
+goLong  = canEnter and isBull
+goShort = canEnter and isBear
 
 // =============================================================================
 // ENTRY TRACKING
