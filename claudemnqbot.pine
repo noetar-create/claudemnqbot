@@ -1,24 +1,292 @@
-//@version=6
-strategy("claudemnqbot v1", shorttitle="cmb", overlay=true, default_qty_value=5, default_qty_type=strategy.fixed)
+// @version=6
+// =============================================================================
+// claudemnqbot v1 — Research + Backtest Driven NQ/MNQ Window Strategy
+// =============================================================================
+//
+// Backtest findings (1-week NQ 1-min data):
+//   BEST:  10:20 momentum+VWAP (67% win, +47pts avg)
+//          1:50 VWAP reversion short (80% win, +17pts avg)
+//          10:50 failed auction long (100%, small sample)
+//   WORST: 11:50 removed — 0% win rate, consistent loser
+//          11:20 — failed auction only, skip momentum
+//          9:50 shorts — terrible, longs only
+//
+// Per-window rules:
+//   9:30  → VWAP direction + momentum bar
+//   9:50  → Failed auction ONLY (longs preferred)
+//   10:20 → Momentum in VWAP direction (strongest window)
+//   10:50 → Failed auction + VWAP direction longs
+//   11:20 → Failed auction ONLY (very selective)
+//   1:50  → VWAP reversion (fade stretched extremes)
+//
+// Stops: ATR-adaptive (2.5×, floor 15, ceiling 40 pts)
+// Trail: +1.5× stop → lock small profit | +2.5× stop → trail 1× ATR
+// One trade per window. EOD close 4:05 PM.
+// =============================================================================
+
+strategy(
+    title              = "claudemnqbot v1",
+    shorttitle         = "cmb",
+    overlay            = true,
+    pyramiding         = 0,
+    default_qty_type   = strategy.fixed,
+    default_qty_value  = 5,
+    initial_capital    = 50000,
+    currency           = currency.USD,
+    calc_on_every_tick = false,
+    commission_type    = strategy.commission.cash_per_contract,
+    commission_value   = 0.74,
+    slippage           = 1
+)
+
+// =============================================================================
+// INPUTS
+// =============================================================================
+
+contracts     = input.int(5,    "Contracts (MNQ)",           minval=1,    maxval=20)
+webhookSecret = input.string("changeme", "Webhook secret")
+enableAlerts  = input.bool(true, "Enable webhook alerts")
+
+atrPeriod     = input.int(14,   "ATR period",                minval=5,    group="Stop/Trail")
+atrStopMult   = input.float(2.5,"Stop: ATR multiplier",      minval=1.0,  group="Stop/Trail")
+stopMin       = input.float(15.0,"Stop: minimum pts",        minval=5.0,  group="Stop/Trail")
+stopMax       = input.float(40.0,"Stop: maximum pts",        minval=15.0, group="Stop/Trail")
+stage1Trigger = input.float(1.5,"Stage1 trigger (× stop)",   minval=0.5,  group="Stop/Trail")
+trailTrigger  = input.float(2.5,"Trail trigger (× stop)",    minval=1.0,  group="Stop/Trail")
+trailAtr      = input.float(1.0,"Trail behind (× ATR)",      minval=0.25, group="Stop/Trail")
+
+vwapStretch   = input.float(1.5,"VWAP stretch (× ATR)",      minval=0.5,  group="Filters")
+faLookback    = input.int(10,   "Failed auction bars",        minval=5,    group="Filters")
+momBody       = input.float(0.25,"Momentum body (× ATR)",    minval=0.1,  group="Filters")
+
+// =============================================================================
+// TIME
+// =============================================================================
 
 nyHour   = hour(time,   "America/New_York")
 nyMinute = minute(time, "America/New_York")
 tod      = nyHour * 60 + nyMinute
 
-in930  = tod >= 570 and tod < 580
-in950  = tod >= 590 and tod < 610
-in1020 = tod >= 620 and tod < 640
-in1050 = tod >= 650 and tod < 670
-in1120 = tod >= 680 and tod < 700
-in1150 = tod >= 710 and tod < 730
-in1350 = tod >= 830 and tod < 850
+in930  = tod >= 570 and tod < 580   // 9:30–9:40
+in950  = tod >= 590 and tod < 610   // 9:50–10:10
+in1020 = tod >= 620 and tod < 640   // 10:20–10:40  ← strongest
+in1050 = tod >= 650 and tod < 670   // 10:50–11:10
+in1120 = tod >= 680 and tod < 700   // 11:20–11:40
+in1350 = tod >= 830 and tod < 850   // 1:50–2:10
+// 11:50 REMOVED — consistent loser in backtest
 
-inAnyWindow = in930 or in950 or in1020 or in1050 or in1120 or in1150 or in1350
+inAnyWindow = in930 or in950 or in1020 or in1050 or in1120 or in1350
+isNewDay    = ta.change(time("D")) != 0
 
-if inAnyWindow and strategy.position_size == 0
-    strategy.entry("L", close >= open ? strategy.long : strategy.short)
+// =============================================================================
+// SESSION GATES
+// =============================================================================
 
-if nyHour >= 16
-    strategy.close_all()
+var bool fired930  = false
+var bool fired950  = false
+var bool fired1020 = false
+var bool fired1050 = false
+var bool fired1120 = false
+var bool fired1350 = false
 
-bgcolor(inAnyWindow ? color.new(color.blue, 92) : na)
+if isNewDay
+    fired930  := false
+    fired950  := false
+    fired1020 := false
+    fired1050 := false
+    fired1120 := false
+    fired1350 := false
+
+windowFired = (in930  and fired930)  or (in950  and fired950)  or
+              (in1020 and fired1020) or (in1050 and fired1050) or
+              (in1120 and fired1120) or (in1350 and fired1350)
+
+canEnter = inAnyWindow and not windowFired and strategy.position_size == 0
+
+// =============================================================================
+// INDICATORS
+// =============================================================================
+
+vwapLine = ta.vwap(hlc3)
+atrVal   = ta.atr(atrPeriod)
+stopPts  = math.max(stopMin, math.min(stopMax, atrStopMult * atrVal))
+
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+bodySize  = math.abs(close - open)
+isBull    = close >= open
+isBear    = close  < open
+hasMomBody = bodySize > atrVal * momBody
+
+aboveVwap = close > vwapLine
+belowVwap = close < vwapLine
+
+// =============================================================================
+// BASE PATTERNS
+// =============================================================================
+
+// Failed auction: new N-bar extreme then reversal close
+faLong  = low  < ta.lowest(low,  faLookback)[1] and isBull
+faShort = high > ta.highest(high, faLookback)[1] and isBear
+
+// VWAP reversion: price stretched, rejection wick back toward VWAP
+revLong  = belowVwap and (vwapLine - close) > vwapStretch * atrVal and isBull and lowerWick > bodySize * 0.5
+revShort = aboveVwap and (close - vwapLine) > vwapStretch * atrVal and isBear and upperWick > bodySize * 0.5
+
+// =============================================================================
+// PER-WINDOW SIGNALS (research-based rules)
+// =============================================================================
+
+// 9:30 — VWAP direction + momentum
+// Rationale: opening bar sets tone; trade with institutional flow
+sig930L = in930 and aboveVwap and isBull and hasMomBody
+sig930S = in930 and belowVwap and isBear and hasMomBody
+
+// 9:50 — Failed auction ONLY
+// Rationale: backtest showed momentum/VWAP signals poor here; trap-and-reverse works
+sig950L = in950 and faLong
+sig950S = in950 and faShort
+
+// 10:20 — Momentum in VWAP direction (STRONGEST WINDOW)
+// Rationale: 67% win rate, +47pts avg; institutions extend morning bias here
+sig1020L = in1020 and aboveVwap and isBull and hasMomBody
+sig1020S = in1020 and belowVwap and isBear and hasMomBody
+
+// 10:50 — Failed auction (primary) + VWAP direction longs (secondary)
+// Rationale: failed auction 100% win rate; longs > shorts from backtest
+sig1050L = in1050 and (faLong or (aboveVwap and isBull and hasMomBody))
+sig1050S = in1050 and faShort
+
+// 11:20 — Failed auction ONLY (very selective)
+// Rationale: momentum patterns negative here; only take high-quality traps
+sig1120L = in1120 and faLong
+sig1120S = in1120 and faShort
+
+// 1:50 — VWAP reversion (fade extremes)
+// Rationale: 80% win rate on short reversions; post-lunch mean reversion dominant
+sig1350L = in1350 and revLong
+sig1350S = in1350 and revShort
+
+// Combine
+goLong  = canEnter and (sig930L or sig950L or sig1020L or sig1050L or sig1120L or sig1350L)
+goShort = canEnter and (sig930S or sig950S or sig1020S or sig1050S or sig1120S or sig1350S)
+
+// =============================================================================
+// ENTRY LABEL TRACKING
+// =============================================================================
+
+var string activeRule   = ""
+var string activeWindow = ""
+
+winLabel = in930 ? "nine_thirty" : in950 ? "nine_fifty" : in1020 ? "ten_twenty" : in1050 ? "ten_fifty" : in1120 ? "eleven_twenty" : "one_fifty"
+
+if goLong
+    activeWindow := winLabel
+    activeRule   := in930 ? "vwap_momentum_long" : in950 ? "failed_auction_long" : in1020 ? "vwap_momentum_long" : in1050 ? (faLong ? "failed_auction_long" : "vwap_momentum_long") : in1120 ? "failed_auction_long" : "vwap_reversion_long"
+    strategy.entry("Long", strategy.long, qty=contracts)
+    if in930
+        fired930 := true
+    if in950
+        fired950 := true
+    if in1020
+        fired1020 := true
+    if in1050
+        fired1050 := true
+    if in1120
+        fired1120 := true
+    if in1350
+        fired1350 := true
+
+if goShort
+    activeWindow := winLabel
+    activeRule   := in930 ? "vwap_momentum_short" : in950 ? "failed_auction_short" : in1020 ? "vwap_momentum_short" : in1050 ? "failed_auction_short" : in1120 ? "failed_auction_short" : "vwap_reversion_short"
+    strategy.entry("Short", strategy.short, qty=contracts)
+    if in930
+        fired930 := true
+    if in950
+        fired950 := true
+    if in1020
+        fired1020 := true
+    if in1050
+        fired1050 := true
+    if in1120
+        fired1120 := true
+    if in1350
+        fired1350 := true
+
+// =============================================================================
+// STOP / TRAIL MANAGEMENT
+// =============================================================================
+
+var float stopLevel  = na
+var float entryPx    = na
+var float initStop   = na
+var bool  stage1Done = false
+
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    entryPx    := strategy.position_avg_price
+    isLng       = strategy.position_size > 0
+    initStop   := stopPts
+    stopLevel  := isLng ? entryPx - stopPts : entryPx + stopPts
+    stage1Done := false
+
+if strategy.position_size != 0
+    isLng      = strategy.position_size > 0
+    unrealized = isLng ? (close - entryPx) : (entryPx - close)
+    proposed   = stopLevel
+
+    if not stage1Done and unrealized >= stage1Trigger * initStop
+        lockStop   = isLng ? entryPx + 0.1 * initStop : entryPx - 0.1 * initStop
+        proposed  := isLng ? math.max(stopLevel, lockStop) : math.min(stopLevel, lockStop)
+        stage1Done := true
+
+    if unrealized >= trailTrigger * initStop
+        trailStop  = isLng ? close - trailAtr * atrVal : close + trailAtr * atrVal
+        proposed  := isLng ? math.max(stopLevel, trailStop) : math.min(stopLevel, trailStop)
+
+    stopLevel := proposed
+    strategy.exit("SL", stop=stopLevel)
+
+if nyHour == 16 and nyMinute >= 5 and strategy.position_size != 0
+    strategy.close_all(comment="EOD")
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    stopLevel  := na
+    entryPx    := na
+    initStop   := na
+    stage1Done := false
+
+// =============================================================================
+// VISUALS
+// =============================================================================
+
+plot(vwapLine, "VWAP", color=color.new(color.blue, 0), linewidth=1)
+plot(strategy.position_size != 0 ? stopLevel : na, "Stop", color=color.red, linewidth=2, style=plot.style_linebr)
+
+bgcolor(in930  ? color.new(color.blue,   92) : na, title="9:30")
+bgcolor(in950  ? color.new(color.purple, 92) : na, title="9:50")
+bgcolor(in1020 ? color.new(color.teal,   92) : na, title="10:20")
+bgcolor(in1050 ? color.new(color.orange, 92) : na, title="10:50")
+bgcolor(in1120 ? color.new(color.yellow, 92) : na, title="11:20")
+bgcolor(in1350 ? color.new(color.blue,   92) : na, title="1:50")
+
+// =============================================================================
+// WEBHOOK ALERTS
+// =============================================================================
+
+onEntry = (goLong or goShort) and enableAlerts
+onExit  = strategy.position_size == 0 and strategy.position_size[1] != 0 and enableAlerts
+
+if onEntry
+    action  = goLong ? "long_entry" : "short_entry"
+    spts    = not na(initStop) ? initStop : stopPts
+    jsonMsg = '{"secret":"' + webhookSecret + '","event":"entry","action":"' + action + '","window":"' + activeWindow + '","rule":"' + activeRule + '","price":' + str.tostring(close, "#.##") + ',"ticker":"' + syminfo.ticker + '","contracts":' + str.tostring(contracts) + ',"stop_pts":' + str.tostring(spts, "#.##") + ',"vwap":' + str.tostring(vwapLine, "#.##") + '}'
+    alert(jsonMsg, alert.freq_once_per_bar_close)
+
+if onExit
+    action     = strategy.position_size[1] > 0 ? "long_exit" : "short_exit"
+    grossPnl   = strategy.closedtrades.profit(strategy.closedtrades - 1) + strategy.closedtrades.commission(strategy.closedtrades - 1)
+    pnlPts     = grossPnl / (syminfo.pointvalue * contracts)
+    pnlDollars = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    jsonMsg    = '{"secret":"' + webhookSecret + '","event":"exit","action":"' + action + '","window":"' + activeWindow + '","price":' + str.tostring(close, "#.##") + ',"ticker":"' + syminfo.ticker + '","contracts":' + str.tostring(contracts) + ',"pnl_pts":' + str.tostring(pnlPts, "#.##") + ',"pnl_usd":' + str.tostring(pnlDollars, "#.##") + '}'
+    alert(jsonMsg, alert.freq_once_per_bar_close)
